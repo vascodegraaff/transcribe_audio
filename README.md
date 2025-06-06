@@ -9,6 +9,10 @@ A FastAPI-based web application that provides real-time speech transcription usi
 - Deepgram integration for accurate speech recognition
 - Responsive web interface
 
+## Screenshot
+
+![Application Screenshot](screenshot.png)
+
 ## Prerequisites
 
 - Python 3.7+
