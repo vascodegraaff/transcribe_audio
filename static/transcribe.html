@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Live Transcription – Deepgram SDK</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 2rem;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    #controls {
+      margin-bottom: 1rem;
+      display: flex;
+      gap: 10px;
+    }
+    #transcript {
+      margin-top: 1rem;
+      padding: 1rem;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background: #fafafa;
+      min-height: 200px;
+      white-space: pre-wrap;
+      line-height: 1.5;
+    }
+    .partial {
+      color: #999;
+    }
+    .final {
+      color: #000;
+    }
+    button {
+      padding: 0.5rem 1rem;
+      font-size: 1rem;
+      background-color: #4CAF50;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:disabled {
+      background-color: #cccccc;
+      cursor: not-allowed;
+    }
+    #stopBtn {
+      background-color: #f44336;
+    }
+    #log {
+      font-family: monospace;
+      margin-top: 1rem;
+      padding: 1rem;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background: #272822;
+      color: #f8f8f2;
+      height: 150px;
+      overflow-y: auto;
+    }
+    .error {
+      color: #f92672;
+    }
+    .success {
+      color: #a6e22e;
+    }
+    .info {
+      color: #66d9ef;
+    }
+    .status {
+      margin: 10px 0;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <h1>🎙️ Live Transcription (Deepgram SDK)</h1>
+  <div class="status" id="status">Ready to start</div>
+  <div id="controls">
+    <button id="startBtn">Start Listening</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <button id="clearBtn">Clear Transcript</button>
+  </div>
+  <div id="transcript"></div>
+  <h3>Debug Log</h3>
+  <div id="log"></div>
+
+  <script>
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const clearBtn = document.getElementById("clearBtn");
+    const transcriptDiv = document.getElementById("transcript");
+    const logDiv = document.getElementById("log");
+    const statusDiv = document.getElementById("status");
+
+    let socket, audioContext, sourceNode, processorNode;
+    let connected = false;
+    let currentPartialSpan = null;
+    
+    // Add to debug log
+    function logMessage(message, type = 'info') {
+      const entry = document.createElement('div');
+      entry.classList.add(type);
+      entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+      logDiv.appendChild(entry);
+      logDiv.scrollTop = logDiv.scrollHeight;
+    }
+
+    // Update status
+    function updateStatus(message, isError = false) {
+      statusDiv.textContent = message;
+      statusDiv.style.color = isError ? '#f44336' : '#4CAF50';
+    }
+
+    // Handle websocket connection
+    async function setupWebSocket() {
+      try {
+        // Create WebSocket connection
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProtocol}//${window.location.host}/ws/transcribe/deepgram`;
+        logMessage(`Connecting to ${wsUrl}`);
+        updateStatus("Connecting to server...");
+        
+        socket = new WebSocket(wsUrl);
+
+        socket.addEventListener("open", () => {
+          logMessage("WebSocket connection established", "success");
+          updateStatus("Connected! Waiting for speech...");
+          connected = true;
+        });
+
+        socket.addEventListener("message", (event) => {
+          try {
+            const msgObj = JSON.parse(event.data);
+            
+            // Handle error messages
+            if (msgObj.error) {
+              logMessage(`Error: ${msgObj.error}`, "error");
+              updateStatus(`Error: ${msgObj.error}`, true);
+              return;
+            }
+            
+            const text = (msgObj.text || "").trim();
+            const isFinal = msgObj.is_final;
+
+            if (!text) return;
+
+            if (!isFinal) {
+              // Remove previous partial if it exists
+              if (currentPartialSpan) {
+                currentPartialSpan.remove();
+              }
+
+              // Create new partial span
+              currentPartialSpan = document.createElement("span");
+              currentPartialSpan.className = "partial";
+              currentPartialSpan.innerText = text;
+              transcriptDiv.appendChild(currentPartialSpan);
+            } else {
+              // Remove the partial span if it exists
+              if (currentPartialSpan) {
+                currentPartialSpan.remove();
+                currentPartialSpan = null;
+              }
+
+              // Create final text
+              const finalSpan = document.createElement("span");
+              finalSpan.className = "final";
+              finalSpan.innerText = text + " ";
+              transcriptDiv.appendChild(finalSpan);
+            }
+            
+            // Always scroll to the bottom of the transcript
+            transcriptDiv.scrollTop = transcriptDiv.scrollHeight;
+          } catch (e) {
+            logMessage(`Error parsing message: ${e.message}`, "error");
+          }
+        });
+
+        socket.addEventListener("error", (error) => {
+          logMessage(`WebSocket error: ${error.message || "Unknown error"}`, "error");
+          updateStatus("Connection error", true);
+        });
+
+        socket.addEventListener("close", (event) => {
+          logMessage(`WebSocket closed: Code ${event.code}`, "info");
+          connected = false;
+          updateStatus("Disconnected", true);
+          
+          // Reset UI
+          startBtn.disabled = false;
+          stopBtn.disabled = true;
+          
+          // Clean up audio if necessary
+          cleanupAudio();
+        });
+
+        return true;
+      } catch (e) {
+        logMessage(`Error creating WebSocket: ${e.message}`, "error");
+        updateStatus(`Connection failed: ${e.message}`, true);
+        return false;
+      }
+    }
+
+    // Setup audio capture and processing
+    async function setupAudio() {
+      try {
+        // Request microphone access
+        logMessage("Requesting microphone access...");
+        updateStatus("Requesting microphone access...");
+        
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          }
+        });
+        
+        logMessage("Microphone access granted", "success");
+        updateStatus("Microphone connected. Speak now!");
+        
+        // Create audio context with 16kHz sample rate for Deepgram
+        audioContext = new AudioContext({ sampleRate: 16000 });
+        sourceNode = audioContext.createMediaStreamSource(stream);
+
+        // Use ScriptProcessorNode (deprecated but widely supported)
+        processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+        processorNode.onaudioprocess = (e) => {
+          if (!connected || !socket || socket.readyState !== WebSocket.OPEN) return;
+          
+          try {
+            // Convert Float32Array to Int16Array for PCM16 format
+            const floatData = e.inputBuffer.getChannelData(0);
+            const int16Data = new Int16Array(floatData.length);
+            
+            for (let i = 0; i < floatData.length; i++) {
+              // Clamp values between -1 and 1, then convert to int16
+              const s = Math.max(-1, Math.min(1, floatData[i]));
+              int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }
+            
+            // Send audio data to server
+            socket.send(int16Data.buffer);
+          } catch (e) {
+            logMessage(`Error processing audio: ${e.message}`, "error");
+          }
+        };
+
+        // Connect the audio processing pipeline
+        sourceNode.connect(processorNode);
+        processorNode.connect(audioContext.destination);
+        
+        logMessage("Audio processing started", "success");
+        return true;
+      } catch (e) {
+        logMessage(`Error setting up audio: ${e.message}`, "error");
+        updateStatus(`Microphone error: ${e.message}`, true);
+        return false;
+      }
+    }
+
+    // Clean up audio resources
+    function cleanupAudio() {
+      if (processorNode) {
+        try {
+          processorNode.disconnect();
+          logMessage("Audio processor disconnected");
+        } catch (e) {
+          logMessage(`Error disconnecting processor: ${e.message}`, "error");
+        }
+      }
+      
+      if (sourceNode) {
+        try {
+          sourceNode.disconnect();
+          logMessage("Audio source disconnected");
+        } catch (e) {
+          logMessage(`Error disconnecting source: ${e.message}`, "error");
+        }
+      }
+      
+      if (audioContext) {
+        try {
+          audioContext.close();
+          logMessage("Audio context closed");
+        } catch (e) {
+          logMessage(`Error closing audio context: ${e.message}`, "error");
+        }
+      }
+    }
+
+    // Start button click handler
+    startBtn.addEventListener("click", async () => {
+      logMessage("Starting transcription service...");
+      
+      // Setup WebSocket connection
+      if (await setupWebSocket()) {
+        // Setup audio capture and processing
+        if (await setupAudio()) {
+          startBtn.disabled = true;
+          stopBtn.disabled = false;
+        } else {
+          // Close socket if audio setup fails
+          if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.close();
+          }
+        }
+      }
+    });
+
+    // Stop button click handler
+    stopBtn.addEventListener("click", () => {
+      logMessage("Stopping transcription...");
+      updateStatus("Stopped", false);
+      
+      // Clean up audio resources
+      cleanupAudio();
+      
+      // Close WebSocket connection
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.close(1000, "User stopped transcription");
+        logMessage("WebSocket connection closed");
+      }
+      
+      // Reset UI
+      connected = false;
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      
+      logMessage("Transcription stopped", "info");
+    });
+    
+    // Clear transcript button click handler
+    clearBtn.addEventListener("click", () => {
+      transcriptDiv.innerHTML = '';
+      currentPartialSpan = null;
+      logMessage("Transcript cleared");
+    });
+    
+    // Log page load
+    logMessage("Page loaded. Click 'Start Listening' to begin transcription.");
+    
+    // Handle page unload to clean up resources
+    window.addEventListener('beforeunload', () => {
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.close();
+      }
+      cleanupAudio();
+    });
+  </script>
+</body>
+</html>
